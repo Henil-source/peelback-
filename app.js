@@ -2,7 +2,13 @@ import { inpaint } from './inpaint.js';
 
 const MAX_SIDE = 4096;       // larger uploads are scaled down to keep memory sane
 const HISTORY_LIMIT = 20;
-const MODEL_ID = 'Xenova/modnet';
+// Cutout models, run on-device. dtype is chosen per backend: full precision on the GPU,
+// 8-bit on the CPU to keep the download and memory small.
+// RMBG-1.4 weights are free for non-commercial use (BRIA licence); MODNet is Apache-2.0.
+const MODELS = {
+  best: { id: 'briaai/RMBG-1.4', dtype: { webgpu: 'fp32', wasm: 'q8' }, input: 'input', sigmoid: false },
+  fast: { id: 'Xenova/modnet', dtype: { webgpu: 'fp32', wasm: 'q8' }, input: 'input', sigmoid: false },
+};
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -11,7 +17,7 @@ const el = {
   status: $('status'), removeBg: $('btn-remove-bg'), bgFill: $('bg-fill'), bgCustom: $('bg-custom'),
   modePaint: $('mode-paint'), modeUnpaint: $('mode-unpaint'), size: $('brush-size'), sizeOut: $('brush-out'),
   erase: $('btn-erase'), clearMask: $('btn-clear-mask'), undo: $('btn-undo'), redo: $('btn-redo'),
-  compare: $('btn-compare'), download: $('btn-download'), newImg: $('btn-new'),
+  compare: $('btn-compare'), toggleBg: $('btn-toggle-bg'), quality: $('cut-quality'), download: $('btn-download'), newImg: $('btn-new'),
 };
 const vctx = el.view.getContext('2d', { willReadFrequently: true });
 const pctx = el.paint.getContext('2d', { willReadFrequently: true });
@@ -19,7 +25,9 @@ const pctx = el.paint.getContext('2d', { willReadFrequently: true });
 const state = {
   name: 'image',
   original: null,   // ImageData as uploaded
-  cur: null,        // ImageData being edited; alpha holds the cutout
+  cur: null,        // the photo being edited (erases change this)
+  cut: null,        // cutout alpha (Uint8ClampedArray) or null
+  showCut: true,    // false shows the photo with its background back
   undo: [], redo: [],
   mode: 'paint',
   hasMask: false,
@@ -52,7 +60,7 @@ async function loadFile(file) {
   state.name = (file.name || 'image').replace(/\.[^.]+$/, '') || 'image';
   state.original = x.getImageData(0, 0, w, h);
   state.cur = new ImageData(new Uint8ClampedArray(state.original.data), w, h);
-  state.undo = []; state.redo = []; state.bgRemoved = false;
+  state.undo = []; state.redo = []; state.bgRemoved = false; state.cut = null; state.showCut = true;
   el.view.width = el.paint.width = w; el.view.height = el.paint.height = h;
   clearMask();
   el.drop.hidden = true; el.wrap.hidden = false; el.newImg.hidden = false;
@@ -76,7 +84,15 @@ function compose(ctx, img) {
 }
 function render() {
   if (!state.cur) return;
-  compose(vctx, state.comparing ? state.original : state.cur);
+  compose(vctx, state.comparing ? state.original : display());
+}
+// The photo with the cutout applied (when there is one and it is switched on).
+function display() {
+  const { cur, cut } = state;
+  if (!cut || !state.showCut) return cur;
+  const d = new Uint8ClampedArray(cur.data);
+  for (let i = 0, n = cut.length; i < n; i++) { const a = i * 4 + 3; if (cut[i] < d[a]) d[a] = cut[i]; }
+  return new ImageData(d, cur.width, cur.height);
 }
 function fit() {
   if (!state.cur) return;
@@ -92,15 +108,19 @@ el.bgCustom.addEventListener('input', () => { el.bgFill.querySelector('input[val
 
 // ---------- History ----------
 function snapshot() {
-  state.undo.push(new Uint8ClampedArray(state.cur.data));
+  state.undo.push(takeSnap());
   if (state.undo.length > HISTORY_LIMIT) state.undo.shift();
   state.redo = [];
   syncButtons();
 }
+function takeSnap() {
+  return { px: new Uint8ClampedArray(state.cur.data), cut: state.cut && new Uint8ClampedArray(state.cut), showCut: state.showCut };
+}
 function step(from, to) {
   if (!from.length) return;
-  to.push(new Uint8ClampedArray(state.cur.data));
-  state.cur.data.set(from.pop());
+  to.push(takeSnap());
+  const s = from.pop();
+  state.cur.data.set(s.px); state.cut = s.cut; state.showCut = s.showCut; state.bgRemoved = !!s.cut;
   render(); syncButtons();
 }
 el.undo.addEventListener('click', () => step(state.undo, state.redo));
@@ -115,9 +135,23 @@ el.compare.addEventListener('keydown', (e) => { if ((e.key === ' ' || e.key === 
 el.compare.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') endCompare(); });
 
 // ---------- Background removal ----------
-let segmenter = null;
-async function getSegmenter() {
-  if (segmenter) return segmenter;
+const segmenters = {};
+async function hasWebGPU() {
+  try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch { return false; }
+}
+function makeRun(T, model, processor, cfg) {
+  return async (raw) => {
+    const { pixel_values } = await processor(raw);
+    const out = await model({ [cfg.input]: pixel_values });
+    let t = out[Object.keys(out)[0]][0];
+    if (t.type === 'float16') t = t.to('float32');
+    if (cfg.sigmoid) t = t.sigmoid();
+    return T.RawImage.fromTensor(t.mul(255).to('uint8'));
+  };
+}
+async function getSegmenter(key) {
+  if (segmenters[key]) return segmenters[key];
+  const cfg = MODELS[key];
   const T = await import('./vendor/transformers.min.js');
   T.env.backends.onnx.wasm.wasmPaths = new URL('./vendor/', import.meta.url).href;
   const p = new URLSearchParams(location.search);
@@ -126,40 +160,64 @@ async function getSegmenter() {
     T.env.localModelPath = new URL('./models/', location.href).href;
   }
   const progress = (info) => {
-    if (info.status === 'progress' && info.total) setBusy(`Downloading cutout model… ${Math.round((info.loaded / info.total) * 100)}%`);
+    if (info.status === 'progress' && info.total > 1e6) setBusy(`Downloading cutout model (first time only)… ${Math.round((info.loaded / info.total) * 100)}%`);
   };
-  const [model, processor] = await Promise.all([
-    T.AutoModel.from_pretrained(MODEL_ID, { dtype: 'q8', device: 'wasm', progress_callback: progress }),
-    T.AutoProcessor.from_pretrained(MODEL_ID),
-  ]);
-  segmenter = { T, model, processor };
-  return segmenter;
+  const devices = (await hasWebGPU()) && !p.has('wasm') ? ['webgpu', 'wasm'] : ['wasm'];
+  const processor = await T.AutoProcessor.from_pretrained(cfg.id);
+  let lastErr;
+  for (const device of devices) {
+    try {
+      const model = await T.AutoModel.from_pretrained(cfg.id, { dtype: cfg.dtype[device], device, progress_callback: progress });
+      const seg = { T, model, processor, cfg, device, run: makeRun(T, model, processor, cfg) };
+      segmenters[key] = seg;
+      return seg;
+    } catch (e) { lastErr = e; console.warn(`Cutout model failed on ${device}`, e); }
+  }
+  throw lastErr;
 }
 
 el.removeBg.addEventListener('click', async () => {
   if (state.busy || !state.cur) return;
+  const key = el.quality.value in MODELS ? el.quality.value : 'best';
   setBusy('Loading cutout model…');
   try {
-    const { T, model, processor } = await getSegmenter();
+    let seg = await getSegmenter(key);
     setBusy('Finding the subject…');
     await nextFrame();
-    const { width: w, height: h, data } = state.cur;
-    const raw = new T.RawImage(new Uint8ClampedArray(data), w, h, 4).rgb();
-    const { pixel_values } = await processor(raw);
-    const { output } = await model({ input: pixel_values });
-    const mask = await T.RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(w, h);
+    const { width: w, height: h } = state.cur;
+    // Run on the original pixels so earlier erases never confuse the model's view of the edges.
+    const raw = new seg.T.RawImage(new Uint8ClampedArray(state.cur.data), w, h, 4).rgb();
+    let mask;
+    try { mask = await seg.run(raw); }
+    catch (e) {
+      if (seg.device === 'wasm') throw e;
+      console.warn('GPU run failed, retrying on CPU', e);
+      delete segmenters[key];
+      const T = seg.T;
+      const model = await T.AutoModel.from_pretrained(seg.cfg.id, { dtype: seg.cfg.dtype.wasm, device: 'wasm' });
+      seg = { ...seg, model, device: 'wasm', run: makeRun(T, model, seg.processor, seg.cfg) };
+      segmenters[key] = seg;
+      setBusy('Finding the subject (this computer has no usable GPU, so it may take a little longer)…');
+      mask = await seg.run(raw);
+    }
+    mask = await mask.resize(w, h);
     snapshot();
-    const d = state.cur.data, md = mask.data;
-    for (let i = 0; i < w * h; i++) d[i * 4 + 3] = Math.min(d[i * 4 + 3], md[i]);
-    state.bgRemoved = true;
-    render();
-    setStatus('Background removed. Pick a fill colour or download as a transparent PNG.');
+    state.cut = new Uint8ClampedArray(mask.data.length === w * h ? mask.data : mask.grayscale().data);
+    state.showCut = true; state.bgRemoved = true;
+    render(); syncButtons();
+    setStatus('Background removed. Pick a fill colour, keep it transparent, or download.');
   } catch (err) {
     console.warn(err);
     setStatus(navigator.onLine === false
       ? 'You appear to be offline. The cutout model needs to download once before it can run.'
-      : 'Background removal failed. Check your connection and try again.', true);
+      : 'Background removal failed. Try the Fast option, or check your connection and try again.', true);
   } finally { setBusy(null); }
+});
+
+el.toggleBg.addEventListener('click', () => {
+  if (!state.cut) return;
+  state.showCut = !state.showCut;
+  render(); syncButtons();
 });
 
 // ---------- Brush ----------
@@ -192,7 +250,7 @@ function stroke(a, b) {
 el.paint.style.opacity = '0.5';
 el.paint.addEventListener('pointerdown', (e) => {
   if (state.busy || !state.cur || e.button > 0) return;
-  el.paint.setPointerCapture(e.pointerId);
+  try { el.paint.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
   drawing = true; last = toImg(e); stroke(last, last);
 });
 el.paint.addEventListener('pointermove', (e) => {
@@ -232,8 +290,19 @@ el.erase.addEventListener('click', async () => {
     const t = performance.now();
     snapshot();
     inpaint(state.cur, mask);
+    if (state.cut) {
+      // Keep the cutout consistent: fill its alpha in the brushed area from the surroundings too.
+      const { width: w, height: h } = state.cur;
+      const a = new ImageData(w, h);
+      for (let i = 0; i < w * h; i++) { const v = state.cut[i]; a.data[i * 4] = a.data[i * 4 + 1] = a.data[i * 4 + 2] = v; a.data[i * 4 + 3] = 255; }
+      inpaint(a, mask, { grain: 0 });
+      for (let i = 0; i < w * h; i++) state.cut[i] = a.data[i * 4];
+    }
     clearMask(); render();
-    setStatus(`Erased in ${Math.round(performance.now() - t)} ms. Brush again to touch up, or Undo.`);
+    const ms = Math.round(performance.now() - t);
+    setStatus(state.cut && state.showCut
+      ? `Erased in ${ms} ms. The background is hidden right now, so changes there only show after "Bring background back".`
+      : `Erased in ${ms} ms. Brush again to touch up, or Undo.`);
   } catch (err) {
     console.warn(err); setStatus('Something went wrong while erasing. Try a smaller area.', true);
   } finally { setBusy(null); }
@@ -244,7 +313,7 @@ el.download.addEventListener('click', () => {
   if (!state.cur) return;
   const c = document.createElement('canvas');
   c.width = state.cur.width; c.height = state.cur.height;
-  compose(c.getContext('2d'), state.cur);
+  compose(c.getContext('2d'), display());
   c.toBlob((blob) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `${state.name}-peelback.png`;
@@ -269,7 +338,6 @@ document.addEventListener('keydown', (e) => {
 // ---------- UI helpers ----------
 function enableTools(on) {
   [el.removeBg, el.modePaint, el.modeUnpaint, el.size, el.compare, el.download].forEach((b) => (b.disabled = !on));
-  el.bgFill.disabled = !on;
   syncButtons();
 }
 function syncButtons() {
@@ -280,6 +348,9 @@ function syncButtons() {
   el.redo.disabled = !(ready && state.redo.length);
   el.removeBg.disabled = !ready;
   el.download.disabled = !ready;
+  el.bgFill.disabled = !(ready && state.cut && state.showCut);
+  el.toggleBg.disabled = !(ready && state.cut);
+  el.toggleBg.textContent = state.cut && !state.showCut ? 'Hide background again' : 'Bring background back';
 }
 function setBusy(text) {
   state.busy = !!text;

@@ -57,6 +57,14 @@
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8z"/></svg>
           Remove background
         </button>
+        <label class="field field-inline">
+          <span>Cutout quality</span>
+          <select id="cut-quality">
+            <option value="best" selected>Best (any subject, larger download)</option>
+            <option value="fast">Fast (people only, 7 MB)</option>
+          </select>
+        </label>
+        <button id="btn-toggle-bg" class="btn btn-ghost btn-block" type="button" disabled>Bring background back</button>
         <fieldset id="bg-fill" class="swatches" disabled>
           <legend>Fill behind subject</legend>
           <label class="swatch"><input type="radio" name="bg" value="transparent" checked><span class="sw sw-checker" title="Transparent"></span><span class="sr">Transparent</span></label>
@@ -92,7 +100,7 @@
           <button id="btn-compare" class="btn btn-ghost" type="button" disabled title="Hold to see the original">Hold to compare</button>
         </div>
       </div>
-      <p class="fineprint">Background cutout uses the open MODNet model, downloaded once (about 7 MB) and cached by your browser. It works best on people and clear subjects.</p>
+      <p class="fineprint">Cutouts use open models (RMBG-1.4 or MODNet) that download once, are cached by your browser and run on this device. Erasing works on the full photo, so you can erase before or after removing the background.</p>
     </aside>
   </main>
 
