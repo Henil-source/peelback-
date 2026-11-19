@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peelback</title>
+  <meta name="description" content="Remove photo backgrounds and brush away logos or objects from your own images. Runs in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Cpath d='M9 23V9h8a5 5 0 010 10h-4' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8"/><path d="M9 23V9h8a5 5 0 010 10h-4"/></svg>
+      </span>
+      <span class="brand-name">Peelback</span>
+      <span class="brand-tag">Private, in-browser photo cleanup</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-new" class="btn btn-ghost" type="button" hidden>New image</button>
+      <button id="btn-download" class="btn btn-primary" type="button" disabled>
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
+        Download PNG
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage" aria-label="Image workspace">
+      <label id="dropzone" class="dropzone" for="file-input">
+        <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        <svg class="drop-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l4.5-4.5a2 2 0 012.8 0L16 16m-2-2l1.5-1.5a2 2 0 012.8 0L20 14M14 8h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        <span class="drop-title">Drop an image here</span>
+        <span class="drop-sub">or click to choose, or paste from your clipboard. PNG, JPG or WebP.</span>
+        <span class="drop-note">Your image never leaves this device.</span>
+      </label>
+
+      <div id="canvas-wrap" class="canvas-wrap" hidden>
+        <div id="canvas-box" class="canvas-box checker">
+          <canvas id="view" aria-label="Edited image"></canvas>
+          <canvas id="paint" class="paint-layer" aria-hidden="true"></canvas>
+          <div id="brush-cursor" class="brush-cursor" hidden></div>
+        </div>
+        <div id="busy" class="busy" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <p id="busy-text" role="status">Working…</p>
+        </div>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <aside class="panel" aria-label="Tools">
+      <div class="card">
+        <h2>Background</h2>
+        <button id="btn-remove-bg" class="btn btn-primary btn-block" type="button" disabled>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8z"/></svg>
+          Remove background
+        </button>
+        <fieldset id="bg-fill" class="swatches" disabled>
+          <legend>Fill behind subject</legend>
+          <label class="swatch"><input type="radio" name="bg" value="transparent" checked><span class="sw sw-checker" title="Transparent"></span><span class="sr">Transparent</span></label>
+          <label class="swatch"><input type="radio" name="bg" value="#ffffff"><span class="sw" style="--c:#ffffff" title="White"></span><span class="sr">White</span></label>
+          <label class="swatch"><input type="radio" name="bg" value="#111827"><span class="sw" style="--c:#111827" title="Charcoal"></span><span class="sr">Charcoal</span></label>
+          <label class="swatch"><input type="radio" name="bg" value="#fde68a"><span class="sw" style="--c:#fde68a" title="Butter"></span><span class="sr">Butter</span></label>
+          <label class="swatch swatch-custom"><input type="radio" name="bg" value="custom"><input id="bg-custom" type="color" value="#93c5fd" aria-label="Custom fill colour"></label>
+        </fieldset>
+      </div>
+
+      <div class="card">
+        <h2>Erase a logo or object</h2>
+        <p class="hint">Paint over the thing you want gone, then press Erase. Use this on images you own or have rights to edit.</p>
+        <div class="seg" role="group" aria-label="Brush mode">
+          <button id="mode-paint" class="seg-btn" type="button" aria-pressed="true" disabled>Brush</button>
+          <button id="mode-unpaint" class="seg-btn" type="button" aria-pressed="false" disabled>Unbrush</button>
+        </div>
+        <label class="field">
+          <span>Brush size <output id="brush-out">40</output> px</span>
+          <input id="brush-size" type="range" min="4" max="200" value="40" disabled>
+        </label>
+        <div class="row">
+          <button id="btn-erase" class="btn btn-primary" type="button" disabled>Erase</button>
+          <button id="btn-clear-mask" class="btn btn-ghost" type="button" disabled>Clear brush</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>History</h2>
+        <div class="row">
+          <button id="btn-undo" class="btn btn-ghost" type="button" disabled title="Ctrl/Cmd+Z">Undo</button>
+          <button id="btn-redo" class="btn btn-ghost" type="button" disabled title="Ctrl/Cmd+Shift+Z">Redo</button>
+          <button id="btn-compare" class="btn btn-ghost" type="button" disabled title="Hold to see the original">Hold to compare</button>
+        </div>
+      </div>
+      <p class="fineprint">Background cutout uses the open MODNet model, downloaded once (about 7 MB) and cached by your browser. It works best on people and clear subjects.</p>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+feature,area,priority,original,clone,notes
+Upload by click/drag/paste,input,must,yes,yes,
+Background removal in browser,cutout,must,yes,yes,MODNet; people best
+Fill colour behind subject,cutout,should,yes,yes,4 presets + custom
+Brush mask with brush/unbrush and size,erase,must,yes,yes,
+Erase brushed area (inpaint),erase,must,yes,partial,smooth fill; weak on strong texture
+Undo/redo,history,must,yes,yes,20 steps
+Hold to compare,history,should,yes,yes,
+Download PNG,output,must,yes,yes,
+Refine cutout edges by brush,cutout,should,yes,no,next
+AI inpainting for textured areas,erase,should,yes,no,next (LaMa-class model)
+Batch processing,input,could,yes,no,
+Accounts and billing,account,skip,yes,no,not needed for v1
