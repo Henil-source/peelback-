@@ -362,4 +362,5 @@ function setBusy(text) {
 function setStatus(msg, isError = false) {
   el.status.textContent = msg; el.status.classList.toggle('error', isError);
 }
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+// Let the busy overlay paint before heavy work. The timeout covers background tabs, where rAF never fires.
+const nextFrame = () => new Promise((r) => { requestAnimationFrame(() => setTimeout(r, 0)); setTimeout(r, 100); });
